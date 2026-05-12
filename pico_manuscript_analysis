@@ -1,0 +1,596 @@
+############################################################
+# PICO resting-state fMRI manuscript analyses
+#
+# This script reproduces the R-based statistical analyses
+# reported in the manuscript.
+#
+# Data are not included in this repository due to ethical
+# and data protection restrictions.
+############################################################
+
+
+############################################################
+# 1. Packages
+############################################################
+
+library(tidyverse)
+library(robustbase)
+library(ggeffects)
+library(pheatmap)
+library(patchwork)
+
+
+############################################################
+# 2. Load data
+############################################################
+
+FC       <- read.csv("data/FC_results.csv")
+GCOR     <- read.csv("data/GCOR_values.csv")
+cog      <- read.csv2("data/data_pico_cognition_mood_concurrentPhe.csv")
+phe      <- read.csv("data/Phe_pat.csv")
+trp      <- read.csv("data/trp_pat.csv")
+tyr      <- read.csv("data/tyr_pat.csv")
+hist_phe <- read.csv("data/Data_PICO_historical_Phe.csv")
+
+
+############################################################
+# 3. Prepare data
+############################################################
+
+cog <- cog %>%
+  mutate(
+    group = as.factor(group),
+    sex   = as.factor(sex),
+    ID    = as.factor(ID),
+    Age   = as.numeric(Age),
+    id_type = ifelse(grepl("PAT", ID), "PAT", "CON"),
+    id_num  = as.numeric(gsub(".*-(\\d+)-.*", "\\1", ID)),
+    id_type = factor(id_type, levels = c("PAT", "CON"))
+  ) %>%
+  arrange(id_type, id_num) %>%
+  select(-id_type, -id_num)
+
+# Add CONN_ID according to CONN project order
+cog$CONN_ID  <- seq_len(nrow(cog))
+FC$CONN_ID   <- seq_len(nrow(FC))
+GCOR$CONN_ID <- seq_len(nrow(GCOR))
+phe$CONN_ID  <- seq_len(nrow(phe))
+trp$CONN_ID  <- seq_len(nrow(trp))
+tyr$CONN_ID  <- seq_len(nrow(tyr))
+
+data <- cog %>%
+  full_join(FC, by = "CONN_ID") %>%
+  full_join(GCOR, by = "CONN_ID") %>%
+  full_join(phe, by = "CONN_ID") %>%
+  full_join(trp, by = "CONN_ID") %>%
+  full_join(tyr, by = "CONN_ID")
+
+# Exclude participants after quality control:
+# excessive motion artefacts n = 2; anatomical anomaly n = 1
+data <- data %>%
+  filter(!CONN_ID %in% c(17, 29, 75))
+
+# Recode variables
+data <- data %>%
+  mutate(
+    sex = factor(sex),
+    group_numeric = as.numeric(group) - 1,
+    group_label = ifelse(group_numeric == 1, "PKU", "HC"),
+    group_label = factor(group_label, levels = c("PKU", "HC"))
+  )
+
+############################################################
+# 4. Participant characteristics / Table 1
+############################################################
+
+cluster_vars <- grep("^cluster", names(data), value = TRUE)
+
+data_fc <- data %>%
+  filter(rowSums(!is.na(select(., all_of(cluster_vars)))) > 0)
+
+table(data_fc$group_label)
+
+format_median_iqr_range <- function(x) {
+  x <- x[!is.na(x)]
+  paste0(
+    round(median(x), 2), " (",
+    round(IQR(x), 2), "; ",
+    round(min(x), 2), " - ",
+    round(max(x), 2), ")"
+  )
+}
+
+table1_vars <- c(
+  "Age",
+  "bdi_score",
+  "wasi_iq",
+  "nback_accuracy",
+  "sust_atten_total_sd",
+  "div_attent_tot_omis",
+  "stroop_cond3_time",
+  "stroop_cond4_time"
+)
+
+table1_descriptives <- data_fc %>%
+  group_by(group_label) %>%
+  summarise(
+    across(
+      all_of(table1_vars),
+      format_median_iqr_range
+    ),
+    n_female = sum(sex == 0, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+table1_descriptives
+
+# Group comparisons
+wilcox.test(Age ~ group_label, data = data_fc)
+wilcox.test(bdi_score ~ group_label, data = data_fc)
+wilcox.test(wasi_iq ~ group_label, data = data_fc)
+wilcox.test(nback_accuracy ~ group_label, data = data_fc)
+wilcox.test(sust_atten_total_sd ~ group_label, data = data_fc)
+wilcox.test(div_attent_tot_omis ~ group_label, data = data_fc)
+wilcox.test(stroop_cond3_time ~ group_label, data = data_fc)
+wilcox.test(stroop_cond4_time ~ group_label, data = data_fc)
+
+fisher.test(table(data_fc$sex, data_fc$group_label))
+
+# Number of patients with IQ below 85
+data_fc %>%
+  group_by(group_label) %>%
+  summarise(
+    n_total = n(),
+    n_low_iq = sum(wasi_iq < 85, na.rm = TRUE),
+    perc_low_iq = round(mean(wasi_iq < 85, na.rm = TRUE) * 100, 1),
+    .groups = "drop"
+  )
+
+############################################################
+# 5. GCOR descriptives
+############################################################
+
+gcor_stats <- data_fc %>%
+  group_by(group_label) %>%
+  summarise(
+    n = n(),
+    mean_GCOR = mean(QC_GCOR_baseline1, na.rm = TRUE),
+    sd_GCOR = sd(QC_GCOR_baseline1, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+gcor_stats
+
+############################################################
+# 6. Patient-only dataset
+############################################################
+
+pat <- data_fc %>%
+  filter(group_label == "PKU") %>%
+  left_join(hist_phe, by = "ID") %>%
+  mutate(
+    sex = factor(sex),
+    age_z = as.numeric(scale(Age)),
+    phe_z = as.numeric(scale(Phe)),
+    Trp_z = as.numeric(scale(Trp)),
+    Tyr_z = as.numeric(scale(Tyr)),
+    nback_accuracy_z = as.numeric(scale(nback_accuracy)),
+    sust_atten_total_sd_z = as.numeric(scale(sust_atten_total_sd)),
+    stroop_cond4_time_z = as.numeric(scale(stroop_cond4_time)),
+    wasi_iq_z = as.numeric(scale(wasi_iq)),
+    IDC_Phe_Child_0.5_z = as.numeric(scale(IDC_Phe_Child_0.5)),
+    IDC_Phe_Child_6.12_z = as.numeric(scale(IDC_Phe_Child_6.12)),
+    IDC_Phe_Adolescence_z = as.numeric(scale(IDC_Phe_Adolescence)),
+    IDC_Phe_Adult_z = as.numeric(scale(IDC_Phe_Adult)),
+    IDC_Phe_Lifetime_z = as.numeric(scale(IDC_Phe_Lifetime))
+  )
+
+############################################################
+# 7. PCA of significant functional connectivity clusters
+############################################################
+
+fc_cluster_vars <- c(
+  "cluster..52..14..20..rest1_DorsalAttention.IPS.l",
+  "cluster..56..14..6..rest1_DorsalAttention.IPS.l",
+  "cluster..2..68..20..rest1_DorsalAttention.IPS.r",
+  "cluster..54..14..4..rest1_DorsalAttention.IPS.r",
+  "cluster..52..14..18..rest1_DorsalAttention.IPS.r",
+  "cluster..30..56..8..rest1_FrontoParietal.LPFC.l",
+  "cluster..18..8..62..rest1_FrontoParietal.LPFC.l",
+  "cluster..rest1_FrontoParietal.LPFC.r",
+  "cluster..rest1_LocalCorrelation_1"
+)
+
+cluster_data_complete <- pat %>%
+  select(all_of(fc_cluster_vars)) %>%
+  drop_na()
+
+pca <- prcomp(cluster_data_complete, scale. = TRUE)
+
+eigenvalues <- pca$sdev^2
+prop_var <- eigenvalues / sum(eigenvalues)
+cum_var <- cumsum(prop_var)
+
+pca_results <- tibble(
+  PC = paste0("PC", seq_along(eigenvalues)),
+  Eigenvalue = eigenvalues,
+  ProportionVar = prop_var,
+  CumulativeVar = cum_var
+)
+
+pca_results
+
+# Add PC scores to patient dataset
+complete_rows <- complete.cases(pat[, fc_cluster_vars])
+
+pat$PC1_network <- NA_real_
+pat$PC2_network <- NA_real_
+pat$PC3_network <- NA_real_
+
+pat$PC1_network[complete_rows] <- pca$x[, 1]
+pat$PC2_network[complete_rows] <- pca$x[, 2]
+pat$PC3_network[complete_rows] <- pca$x[, 3]
+
+############################################################
+# 8. Supplementary Figure 1: Scree plot
+############################################################
+
+scree_data <- tibble(
+  PC = seq_along(eigenvalues),
+  Eigenvalue = eigenvalues
+)
+
+scree_plot <- ggplot(scree_data, aes(x = PC, y = Eigenvalue)) +
+  geom_point(size = 3) +
+  geom_line() +
+  geom_hline(yintercept = 1, linetype = "dashed") +
+  scale_x_continuous(breaks = scree_data$PC) +
+  labs(
+    x = "Principal Component",
+    y = "Eigenvalue"
+  ) +
+  theme_classic(base_size = 16)
+
+
+scree_plot
+
+ggsave(
+  filename = "outputs/figures/supplementary_figure_1_scree_plot.tiff",
+  plot = scree_plot,
+  device = "tiff",
+  dpi = 300,
+  width = 6,
+  height = 5,
+  units = "in"
+)
+
+############################################################
+# 9. Figure 4: PCA loading heatmap
+############################################################
+
+loadings_matrix <- pca$rotation[, 1:3]
+
+custom_cluster_names <- c(
+  "Left DAN - Right Temporal Area",
+  "Left DAN - Left Temporal Area",
+  "Right DAN - Bilateral Occipital Area",
+  "Right DAN - Left Temporal Area",
+  "Right DAN - Right Temporal Area",
+  "Left FPN - Medial Frontal Area",
+  "Left FPN - Upper Frontal Area",
+  "Right FPN - Subcortical Area",
+  "LCOR - Subcortical Area"
+)
+
+rownames(loadings_matrix) <- custom_cluster_names
+
+pheatmap(
+  loadings_matrix,
+  scale = "none",
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  show_rownames = TRUE,
+  show_colnames = TRUE,
+  main = "PCA Loadings Heatmap",
+  color = colorRampPalette(c("blue", "white", "red"))(100),
+  fontsize_row = 12,
+  fontsize_col = 12,
+  fontsize = 12,
+  filename = "outputs/figures/figure_4_pca_loadings_heatmap.tiff",
+  width = 7,
+  height = 6
+)
+
+############################################################
+# 10. Robust regressions: concurrent metabolites
+############################################################
+
+model_phe_full <- lmrob(
+  phe_z ~ PC1_network + PC2_network + PC3_network + age_z + sex,
+  data = pat,
+  setting = "KS2014"
+)
+
+summary(model_phe_full)
+
+model_phe_reduced <- lmrob(
+  phe_z ~ PC1_network + PC2_network + age_z + sex,
+  data = pat,
+  setting = "KS2014"
+)
+
+summary(model_phe_reduced)
+
+model_trp <- lmrob(
+  Trp_z ~ PC1_network + PC2_network + PC3_network + age_z + sex,
+  data = pat,
+  setting = "KS2014"
+)
+
+summary(model_trp)
+
+model_tyr <- lmrob(
+  Tyr_z ~ PC1_network + PC2_network + PC3_network + age_z + sex,
+  data = pat,
+  setting = "KS2014"
+)
+
+summary(model_tyr)
+
+############################################################
+# 11. Figure 5: Phe and principal components
+############################################################
+
+phe_mean <- mean(pat$Phe, na.rm = TRUE)
+phe_sd   <- sd(pat$Phe, na.rm = TRUE)
+
+pred_pc1 <- ggpredict(model_phe_full, terms = "PC1_network [all]") %>%
+  as.data.frame() %>%
+  mutate(
+    predicted_raw = predicted * phe_sd + phe_mean,
+    conf.low_raw  = conf.low * phe_sd + phe_mean,
+    conf.high_raw = conf.high * phe_sd + phe_mean
+  )
+
+figure5a <- ggplot() +
+  geom_point(
+    data = pat,
+    aes(x = PC1_network, y = Phe),
+    colour = "black",
+    alpha = 0.6,
+    size = 3
+  ) +
+  geom_ribbon(
+    data = pred_pc1,
+    aes(x = x, ymin = conf.low_raw, ymax = conf.high_raw),
+    fill = "grey70",
+    alpha = 0.3
+  ) +
+  geom_line(
+    data = pred_pc1,
+    aes(x = x, y = predicted_raw),
+    colour = "black",
+    linewidth = 1.1
+  ) +
+  labs(
+    x = "Principal Component 1",
+    y = "Phe (µmol/L)"
+  ) +
+  theme_classic(base_size = 18)
+
+pred_pc2 <- ggpredict(model_phe_full, terms = "PC2_network [all]") %>%
+  as.data.frame() %>%
+  mutate(
+    predicted_raw = predicted * phe_sd + phe_mean,
+    conf.low_raw  = conf.low * phe_sd + phe_mean,
+    conf.high_raw = conf.high * phe_sd + phe_mean
+  )
+
+figure5b <- ggplot() +
+  geom_point(
+    data = pat,
+    aes(x = PC2_network, y = Phe),
+    colour = "black",
+    alpha = 0.6,
+    size = 3
+  ) +
+  geom_ribbon(
+    data = pred_pc2,
+    aes(x = x, ymin = conf.low_raw, ymax = conf.high_raw),
+    fill = "grey70",
+    alpha = 0.3
+  ) +
+  geom_line(
+    data = pred_pc2,
+    aes(x = x, y = predicted_raw),
+    colour = "black",
+    linewidth = 1.1
+  ) +
+  labs(
+    x = "Principal Component 2",
+    y = "Phe (µmol/L)"
+  ) +
+  theme_classic(base_size = 18)
+
+figure5 <- figure5a | figure5b
+
+figure5
+
+ggsave(
+  filename = "outputs/figures/figure_5_phe_pc1_pc2.tiff",
+  plot = figure5,
+  device = "tiff",
+  dpi = 300,
+  width = 12,
+  height = 5,
+  units = "in",
+  compression = "lzw",
+  bg = "white"
+)
+
+############################################################
+# 12. Model diagnostics and sensitivity checks
+############################################################
+
+# Robustness weights
+model_phe_full$rweights
+which(model_phe_full$rweights < 0.5)
+
+# Comparison with ordinary least squares
+ols_phe <- lm(
+  phe_z ~ PC1_network + PC2_network + PC3_network + age_z + sex,
+  data = pat
+)
+
+summary(ols_phe)
+
+coef_compare <- cbind(
+  OLS = coef(ols_phe),
+  Robust = coef(model_phe_full)
+)
+
+coef_compare
+
+# Alternative robust setting
+model_phe_KS2011 <- lmrob(
+  phe_z ~ PC1_network + PC2_network + PC3_network + age_z + sex,
+  data = pat,
+  setting = "KS2011"
+)
+
+summary(model_phe_KS2011)
+
+############################################################
+# 13. Historical Phe descriptives
+############################################################
+
+historical_vars_raw <- c(
+  "IDC_Phe_Lifetime",
+  "IDC_Phe_Adult",
+  "IDC_Phe_Adolescence",
+  "IDC_Phe_Child_6.12",
+  "IDC_Phe_Child_0.5"
+)
+
+summary(pat$IDC_Phe_Child_0.5)
+summary(pat$IDC_Phe_Child_6.12)
+summary(pat$IDC_Phe_Adolescence)
+summary(pat$IDC_Phe_Adult)
+summary(pat$IDC_Phe_Lifetime)
+
+prop_above <- function(x, threshold) {
+  sum(x > threshold, na.rm = TRUE) / sum(!is.na(x))
+}
+
+prop_above(pat$IDC_Phe_Child_0.5, 360)
+prop_above(pat$IDC_Phe_Child_6.12, 360)
+prop_above(pat$IDC_Phe_Adolescence, 600)
+prop_above(pat$IDC_Phe_Adult, 600)
+
+############################################################
+# 14. Kendall correlations: historical Phe and PCs
+############################################################
+
+historical_vars_z <- c(
+  "IDC_Phe_Lifetime_z",
+  "IDC_Phe_Adult_z",
+  "IDC_Phe_Adolescence_z",
+  "IDC_Phe_Child_6.12_z",
+  "IDC_Phe_Child_0.5_z"
+)
+
+run_kendall <- function(pc_var, hist_vars, data) {
+  map_dfr(hist_vars, function(hist_var) {
+    complete_data <- data %>%
+      filter(!is.na(.data[[pc_var]]), !is.na(.data[[hist_var]]))
+    
+    if (nrow(complete_data) < 3) {
+      return(tibble(
+        PC = pc_var,
+        Period = hist_var,
+        N = nrow(complete_data),
+        Kendall_tau = NA_real_,
+        P_Value = NA_real_
+      ))
+    }
+    
+    test <- cor.test(
+      complete_data[[pc_var]],
+      complete_data[[hist_var]],
+      method = "kendall"
+    )
+    
+    tibble(
+      PC = pc_var,
+      Period = hist_var,
+      N = nrow(complete_data),
+      Kendall_tau = unname(test$estimate),
+      P_Value = test$p.value
+    )
+  })
+}
+
+kendall_pc1 <- run_kendall("PC1_network", historical_vars_z, pat)
+kendall_pc2 <- run_kendall("PC2_network", historical_vars_z, pat)
+
+kendall_pc1
+kendall_pc2
+
+############################################################
+# 15. Robust regressions: cognitive outcomes
+############################################################
+
+cognitive_models <- list(
+  IQ = lmrob(
+    wasi_iq_z ~ PC1_network + PC2_network + PC3_network + age_z + sex,
+    data = pat,
+    setting = "KS2014"
+  ),
+  WorkingMemory = lmrob(
+    nback_accuracy_z ~ PC1_network + PC2_network + PC3_network + age_z + sex,
+    data = pat,
+    setting = "KS2014"
+  ),
+  SustainedAttention = lmrob(
+    sust_atten_total_sd_z ~ PC1_network + PC2_network + PC3_network + age_z + sex,
+    data = pat,
+    setting = "KS2014"
+  ),
+  CognitiveFlexibility = lmrob(
+    stroop_cond4_time_z ~ PC1_network + PC2_network + PC3_network + age_z + sex,
+    data = pat,
+    setting = "KS2014"
+  )
+)
+
+lapply(cognitive_models, summary)
+
+############################################################
+# 16. Sensitivity analysis including IQ as covariate
+############################################################
+
+iq_sensitivity_results <- map_dfr(fc_cluster_vars, function(var) {
+  
+  model_original <- lm(
+    as.formula(paste(var, "~ group_numeric + Age + sex")),
+    data = data_fc
+  )
+  
+  model_iq <- lm(
+    as.formula(paste(var, "~ group_numeric + Age + sex + wasi_iq")),
+    data = data_fc
+  )
+  
+  beta_original <- summary(model_original)$coefficients["group_numeric", "Estimate"]
+  beta_iq       <- summary(model_iq)$coefficients["group_numeric", "Estimate"]
+  
+  tibble(
+    cluster = var,
+    beta_original = beta_original,
+    beta_IQ = beta_iq,
+    delta_beta = beta_iq - beta_original,
+    percent_change = 100 * (beta_iq - beta_original) / abs(beta_original)
+  )
+})
+
+iq_sensitivity_results
