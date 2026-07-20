@@ -16,7 +16,6 @@
 library(tidyverse)
 library(robustbase)
 library(ggeffects)
-library(pheatmap)
 library(patchwork)
 
 
@@ -268,37 +267,64 @@ ggsave(
 # 9. Figure 4: PCA loading heatmap
 ############################################################
 
-loadings_matrix <- pca$rotation[, 1:3]
+loadings_matrix <- as.data.frame(pca$rotation[, 1:3])
+loadings_matrix <- loadings_matrix[order(loadings_matrix$PC1, decreasing = TRUE), ]
 
-custom_cluster_names <- c(
-  "Left DAN - Right Temporal Area",
-  "Left DAN - Left Temporal Area",
-  "Right DAN - Bilateral Occipital Area",
-  "Right DAN - Left Temporal Area",
-  "Right DAN - Right Temporal Area",
-  "Left FPN - Medial Frontal Area",
-  "Left FPN - Upper Frontal Area",
-  "Right FPN - Subcortical Area",
-  "LCOR - Subcortical Area"
+
+cluster_labels <- c(
+  "cluster..56..14..6..rest1_DorsalAttention.IPS.l"  = "Left DAN - Left Temporal Area",
+  "cluster..52..14..20..rest1_DorsalAttention.IPS.l" = "Left DAN - Right Temporal Area",
+  "cluster..54..14..4..rest1_DorsalAttention.IPS.r"  = "Right DAN - Left Temporal Area",
+  "cluster..52..14..18..rest1_DorsalAttention.IPS.r" = "Right DAN - Right Temporal Area",
+  "cluster..rest1_FrontoParietal.LPFC.r"             = "Right FPN - Right Putamen/Pallidum/Insula",
+  "cluster..18..8..62..rest1_FrontoParietal.LPFC.l"  = "Left FPN - Upper Frontal Area (SFG/SMA)",
+  "cluster..2..68..20..rest1_DorsalAttention.IPS.r"  = "Right DAN - Bilateral Occipital Area",
+  "cluster..30..56..8..rest1_FrontoParietal.LPFC.l"  = "Left FPN - Medial Frontal Area (MFG/SFG)",
+  "cluster..rest1_LocalCorrelation_1"                = "Right Putamen/Pallidum/Caudate/Insula"
 )
 
-rownames(loadings_matrix) <- custom_cluster_names
+stopifnot(all(rownames(loadings_matrix) %in% names(cluster_labels)))
+rownames(loadings_matrix) <- cluster_labels[rownames(loadings_matrix)]
 
-pheatmap(
-  loadings_matrix,
-  scale = "none",
-  cluster_rows = FALSE,
-  cluster_cols = FALSE,
-  show_rownames = TRUE,
-  show_colnames = TRUE,
-  main = "PCA Loadings Heatmap",
-  color = colorRampPalette(c("blue", "white", "red"))(100),
-  fontsize_row = 12,
-  fontsize_col = 12,
-  fontsize = 12,
+round(loadings_matrix, 3)
+
+loadings_long <- loadings_matrix %>%
+  rownames_to_column("Cluster") %>%
+  pivot_longer(c(PC1, PC2, PC3), names_to = "PC", values_to = "Loading") %>%
+  mutate(Cluster = factor(Cluster, levels = rev(rownames(loadings_matrix))))
+
+figure4 <- ggplot(loadings_long, aes(x = PC, y = Cluster, fill = Loading)) +
+  geom_tile(color = "grey80") +
+  geom_text(
+    aes(label = sprintf("%.2f", Loading), color = abs(Loading) > 0.45),
+    size = 3.5,
+    show.legend = FALSE
+  ) +
+  scale_color_manual(values = c("black", "white")) +
+  scale_fill_gradient2(
+    low = "blue", mid = "white", high = "red",
+    midpoint = 0, name = "Loading"
+  ) +
+  scale_y_discrete(position = "right") +
+  labs(title = "PCA Loadings Heatmap", x = NULL, y = NULL) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid = element_blank(),
+    axis.text.x = element_text(angle = 90, vjust = 0.5, size = 10),
+    axis.text.y = element_text(size = 10, hjust = 0),
+    plot.title = element_text(hjust = 0, size = 13)
+  )
+
+ggsave(
   filename = "outputs/figures/figure_4_pca_loadings_heatmap.tiff",
+  plot = figure4,
+  device = "tiff",
+  dpi = 300,
   width = 7,
-  height = 6
+  height = 6,
+  units = "in",
+  compression = "lzw",
+  bg = "white"
 )
 
 ############################################################
@@ -535,6 +561,90 @@ kendall_pc2 <- run_kendall("PC2_network", historical_vars_z, pat)
 
 kendall_pc1
 kendall_pc2
+
+############################################################
+# 14b. Supplementary Figures 2 and 3: historical Phe and PCs
+############################################################
+
+period_labels <- c(
+  IDC_Phe_Lifetime_z    = "Lifetime",
+  IDC_Phe_Adult_z       = "18+ years",
+  IDC_Phe_Adolescence_z = "13-17 years",
+  IDC_Phe_Child_6.12_z  = "6-12 years",
+  IDC_Phe_Child_0.5_z   = "0-5 years"
+)
+
+create_correlation_plot <- function(pc_var, hist_var, data) {
+
+  complete_data <- data %>%
+    filter(!is.na(.data[[pc_var]]), !is.na(.data[[hist_var]]))
+
+  kendall_result <- suppressWarnings(
+    cor.test(complete_data[[pc_var]], complete_data[[hist_var]], method = "kendall")
+  )
+
+  x_range <- range(data[[pc_var]], na.rm = TRUE)
+  y_range <- range(unlist(data[historical_vars_z]), na.rm = TRUE)
+
+  annotation_text <- paste0(
+    "Kendall's tau = ", round(kendall_result$estimate, 3), "\n",
+    "p = ", round(kendall_result$p.value, 4), "\n",
+    "n = ", nrow(complete_data)
+  )
+
+  ggplot(complete_data, aes(x = .data[[pc_var]], y = .data[[hist_var]])) +
+    geom_point(colour = "black", alpha = 0.6, size = 3) +
+    geom_smooth(
+      method = "lm", se = TRUE,
+      colour = "black", linewidth = 1.1,
+      fill = "grey70", alpha = 0.3
+    ) +
+    annotate(
+      "label",
+      x = max(x_range) - 0.1 * diff(x_range),
+      y = max(y_range) - 0.1 * diff(y_range),
+      label = annotation_text,
+      hjust = 1, vjust = 1, size = 4.5,
+      fill = "white", alpha = 0.9, colour = "black"
+    ) +
+    labs(
+      title = period_labels[[hist_var]],
+      x = paste("Principal Component", substr(pc_var, 3, 3)),
+      y = "Historical Phe (z-standardized)"
+    ) +
+    xlim(x_range) +
+    ylim(y_range) +
+    theme_classic(base_size = 18) +
+    theme(
+      axis.title = element_text(size = 14),
+      axis.text = element_text(size = 12),
+      plot.title = element_text(hjust = 0.5, face = "bold", size = 16)
+    )
+}
+
+build_supplementary_figure <- function(pc_var, data) {
+  plots <- lapply(historical_vars_z, function(v) create_correlation_plot(pc_var, v, data))
+  wrap_plots(plots, ncol = 3) +
+    plot_annotation(tag_levels = "A") &
+    theme(plot.tag = element_text(size = 18, face = "bold"))
+}
+
+supplementary_figure_2 <- build_supplementary_figure("PC1_network", pat)
+supplementary_figure_3 <- build_supplementary_figure("PC2_network", pat)
+
+ggsave(
+  filename = "outputs/figures/supplementary_figure_2_historical_phe_pc1.tiff",
+  plot = supplementary_figure_2,
+  device = "tiff", dpi = 300, width = 16, height = 12,
+  units = "in", compression = "lzw", bg = "white"
+)
+
+ggsave(
+  filename = "outputs/figures/supplementary_figure_3_historical_phe_pc2.tiff",
+  plot = supplementary_figure_3,
+  device = "tiff", dpi = 300, width = 16, height = 12,
+  units = "in", compression = "lzw", bg = "white"
+)
 
 ############################################################
 # 15. Robust regressions: cognitive outcomes
